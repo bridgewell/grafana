@@ -27,12 +27,12 @@ function (angular, _, dateMath) {
       var qs = [];
       var gExps = [];
 
-      _.each(options.targets, function(target) {
+      _.each(options.targets, function(target, index) {
         if (!target.metric && !target.gexp) { return; }
         if (target.queryType === 'metric') {
           qs.push(convertTargetToQuery(target, options));
         } else if (target.queryType === 'gexp') {
-          gExps.push(target.gexp);
+          gExps.push(convertTargetToGExp(target, options, index));
         }
       });
 
@@ -61,12 +61,11 @@ function (angular, _, dateMath) {
 
       var result = {};
       result.data = [];
-      var queriesPromise;
-      var gexpPromise;
+      var queryPromises = [];
 
       if (queries.length > 0) {
-        queriesPromise = this.performTimeSeriesQuery(queries, start, end).then(function(response) {
-          var metricToTargetMapping = mapMetricsToTargets(response.data, options, this.tsdbVersion);
+        queryPromises.push(this.performTimeSeriesQuery(queries, start, end).then(function(response) {
+          var metricToTargetMapping = mapMetricsToTargets(response.data, options);
           var result = _.map(response.data, function(metricData, index) {
             index = metricToTargetMapping[index];
             if (index === -1) {
@@ -76,30 +75,25 @@ function (angular, _, dateMath) {
             return transformMetricData(metricData, groupByTags, options.targets[index], options, this.tsdbResolution);
           }.bind(this));
           return result;
-        }.bind(this));
+        }.bind(this)));
       }
 
-      if (gExpressions.length > 0) {
-        gexpPromise = this.performTimeSeriesGExpression(gExpressions, start, end).then(function(response) {
-          var gExpToTargetMapping = mapGExpToTargets(response.data, options);
-          var result = _.map(response.data, function(gexpData, index) {
-            index = gExpToTargetMapping[index];
-            if (index === -1) {
-              index = 0;
-            }
-            return transformGexpData(gexpData, options.targets[index], this.tsdbResolution);
+      _.each(gExpressions, function(gexp) {
+        queryPromises.push(this.performTimeSeriesGExpression([gexp], start, end).then(function(response) {
+          var result = _.map(response.data, function(gexpData) {
+            return transformGexpData(
+              gexpData, gexp.tags, options.targets[gexp.target_index], options, this.tsdbResolution);
           }.bind(this));
           return result;
-        }.bind(this));
-      }
+        }.bind(this)));
+      }.bind(this));
 
-      return $q.all([queriesPromise, gexpPromise]).then(function(data) {
-        if (data[0] && data[0].length > 0) {
-          result.data = result.data.concat(data[0]);
-        }
-        if (data[1] && data[1].length > 0) {
-          result.data = result.data.concat(data[1]);
-        }
+      return $q.all(queryPromises).then(function(responses) {
+        _.each(responses, function(data) {
+          if (data && data.length > 0) {
+            result.data = result.data.concat(data);
+          }
+        });
         return result;
       });
 
@@ -193,7 +187,7 @@ function (angular, _, dateMath) {
 
       var urlParams = '?start=' + start;
       _.each(gExps, function(gexp) {
-        urlParams += '&exp=' + gexp;
+        urlParams += '&exp=' + gexp.exp;
       });
 
       var options = {
@@ -388,14 +382,13 @@ function (angular, _, dateMath) {
       return { target: metricLabel, datapoints: dps };
     }
 
-    function transformGexpData(gExp, target, tsdbResolution) {
-
-      var metricLabel;
-      if (!target.gexpAlias || target.gexpAlias === '') {
-        metricLabel = target.gexp;
-      } else {
-        metricLabel = target.gexpAlias;
-      }
+    function transformGexpData(gExp, tags, target, options, tsdbResolution) {
+      var groupByTags = {};
+      _.each(tags, function(val, key) {
+        groupByTags[key] = true;
+      });
+      gExp.metric = target.gexp;
+      var metricLabel = createMetricLabel(gExp, target, groupByTags, options);
       var dps = getDatapoints(gExp, tsdbResolution);
 
       return { target: metricLabel, datapoints: dps };
@@ -513,36 +506,40 @@ function (angular, _, dateMath) {
       return query;
     }
 
-    function mapMetricsToTargets(metrics, options, tsdbVersion) {
-      var interpolatedTagValue;
-      return _.map(metrics, function(metricData) {
-        if (tsdbVersion === 3) {
-          return metricData.query.index;
-        } else {
-          return _.findIndex(options.targets, function(target) {
-            if (target.filters && target.filters.length > 0) {
-              return target.metric === metricData.metric;
-            } else {
-              return target.metric === metricData.metric &&
-              _.every(target.tags, function(tagV, tagK) {
-                interpolatedTagValue = templateSrv.replace(tagV, options.scopedVars, 'pipe');
-                return metricData.tags[tagK] === interpolatedTagValue || interpolatedTagValue === "*";
-              });
-            }
-          });
+    function convertTargetToGExp(target, options, index) {
+      if (!target.gexp || target.hide) {
+        return null;
+      }
+
+      var query = {
+        exp: target.gexp,
+        target_index: index
+      };
+      query.tags = angular.copy(target.tags);
+      if (query.tags){
+        for (var tag_key in query.tags) {
+          query.tags[tag_key] = templateSrv.replace(query.tags[tag_key], options.scopedVars, 'pipe');
         }
-      });
+      }
+
+      return query;
     }
 
-    // A hack until opentsdb supports show_query feature for gexp
-    function mapGExpToTargets(gExps, options) {
-      var targetIndexes = [];
-      _.each(options.targets, function(target, index) {
-        if (target.queryType === 'gexp') {
-          targetIndexes.push(index);
-        }
+    function mapMetricsToTargets(metrics, options) {
+      var interpolatedTagValue;
+      return _.map(metrics, function(metricData) {
+        return _.findIndex(options.targets, function(target) {
+          if (target.filters && target.filters.length > 0) {
+            return target.metric === metricData.metric;
+          } else {
+            return target.metric === metricData.metric &&
+            _.every(target.tags, function(tagV, tagK) {
+              interpolatedTagValue = templateSrv.replace(tagV, options.scopedVars, 'pipe');
+              return metricData.tags[tagK] === interpolatedTagValue || interpolatedTagValue === "*";
+            });
+          }
+        });
       });
-      return targetIndexes;
     }
 
     function convertToTSDBTime(date, roundUp) {
