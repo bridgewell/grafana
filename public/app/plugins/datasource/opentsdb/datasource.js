@@ -29,7 +29,7 @@ function (angular, _, dateMath) {
 
       _.each(options.targets, function(target, index) {
         if (!target.metric && !target.gexp) { return; }
-        if (target.queryType === 'metric') {
+        if (!target.queryType || target.queryType === 'metric') { // default queryType
           qs.push(convertTargetToQuery(target, options));
         } else if (target.queryType === 'gexp') {
           gExps.push(convertTargetToGExp(target, options, index));
