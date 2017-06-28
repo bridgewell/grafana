@@ -51,16 +51,7 @@ func init() {
 func (e *OpenTsdbExecutor) Execute(ctx context.Context, queries tsdb.QuerySlice, queryContext *tsdb.QueryContext) *tsdb.BatchResult {
 	result := &tsdb.BatchResult{}
 
-	var tsdbQuery OpenTsdbQuery
-
-	tsdbQuery.Start = queryContext.TimeRange.GetFromAsMsEpoch()
-	tsdbQuery.End = queryContext.TimeRange.GetToAsMsEpoch()
-
-	for _, query := range queries {
-		metric := e.buildMetric(query)
-		tsdbQuery.Queries = append(tsdbQuery.Queries, metric)
-	}
-
+	tsdbQuery := e.buildQuery(queryContext, queries)
 	if setting.Env == setting.DEV {
 		plog.Debug("OpenTsdb request", "params", tsdbQuery)
 	}
@@ -130,8 +121,12 @@ func (e *OpenTsdbExecutor) parseResponse(query OpenTsdbQuery, res *http.Response
 	}
 
 	for _, val := range data {
-		series := tsdb.TimeSeries{
-			Name: val.Metric,
+		series := tsdb.TimeSeries{}
+
+		if query.AliasFormat == "" {
+			series.Name = val.Metric
+		} else {
+			series.Name = e.createSeriesLabel(val)
 		}
 
 		for timeString, value := range val.DataPoints {
@@ -148,6 +143,20 @@ func (e *OpenTsdbExecutor) parseResponse(query OpenTsdbQuery, res *http.Response
 
 	queryResults["A"] = queryRes
 	return queryResults, nil
+}
+
+func (e *OpenTsdbExecutor) buildQuery(queryContext *tsdb.QueryContext, queries tsdb.QuerySlice) OpenTsdbQuery {
+	var tsdbQuery OpenTsdbQuery
+	tsdbQuery.Start = queryContext.TimeRange.GetFromAsMsEpoch()
+	tsdbQuery.End = queryContext.TimeRange.GetToAsMsEpoch()
+
+	for _, query := range queries {
+		metric := e.buildMetric(query)
+		tsdbQuery.Queries = append(tsdbQuery.Queries, metric)
+		tsdbQuery.AliasFormat = query.Model.Get("alias").MustString()
+	}
+
+	return tsdbQuery
 }
 
 func (e *OpenTsdbExecutor) buildMetric(query *tsdb.Query) map[string]interface{} {
@@ -210,5 +219,16 @@ func (e *OpenTsdbExecutor) buildMetric(query *tsdb.Query) map[string]interface{}
 	}
 
 	return metric
+}
 
+func (e *OpenTsdbExecutor) createSeriesLabel(res OpenTsdbResponse) string {
+	var label = res.Metric
+	if len(res.Tags) > 1 {
+		var tags []string
+		for k, v := range res.Tags {
+			tags = append(tags, k+"="+v)
+		}
+		label += "{" + strings.Join(tags, ",") + "}"
+	}
+	return label
 }
