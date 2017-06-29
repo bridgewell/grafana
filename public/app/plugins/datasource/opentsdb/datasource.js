@@ -186,6 +186,11 @@ function (angular, _, dateMath) {
     this.performTimeSeriesGExpression = function(gExps, start, end) {
 
       var urlParams = '?start=' + start;
+      // Relative queries (e.g. last hour) don't include an end time
+      if (end) {
+        urlParams += '&end=' + end;
+      }
+
       _.each(gExps, function(gexp) {
         urlParams += '&exp=' + gexp.exp;
       });
@@ -194,11 +199,6 @@ function (angular, _, dateMath) {
         method: 'GET',
         url: this.url + '/api/query/gexp' + urlParams
       };
-
-      // Relative queries (e.g. last hour) don't include an end time
-      if (end) {
-        urlParams = '&end=' + end;
-      }
 
       this._addCredentialOptions(options);
       return backendSrv.datasourceRequest(options);
